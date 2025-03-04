@@ -3,7 +3,8 @@ import sys
 from datetime import datetime as dt
 
 buf = 1024
-timeout = 1
+timeout = 0.25
+sep = '/||/'
 
 def start_client():
 
@@ -14,63 +15,62 @@ def start_client():
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.settimeout(timeout)
     server_address = (sys.argv[2], int(sys.argv[3]))
-    client_socket.setblocking(True)  
+    client_socket.setblocking(True)
 
-
-    seq = 0
+    current_ack = 0
 
     with open(sys.argv[1], 'rb') as file:
         file_data = file.read()
         print("Read file")
 
+    file_size = len(file_data)
+
     while 1:
         sender_time = dt.now()
-        packet = f'-2|{sys.argv[1]}'.encode('utf-8')
+        packet = f'-2{sep}{sys.argv[1]}'.encode('utf-8')
         client_socket.sendto(packet, server_address)
         try:
             ack_data, server = client_socket.recvfrom(buf) 
-            if server != server_address: 
-                print("Who the f are you?")
-                continue
-            ack_parts = ack_data.decode('utf-8').split('|')        #expect 2
+            ack, time = ack_data.decode('utf-8').split(sep)        #expect 2
+            if ack != "ACK": continue
 
-            if len(ack_parts) == 2 and ack_parts[0] == 'ACK':
-                time = ack_parts[1]
-                time = dt.strptime(time, "%Y-%m-%d %H:%M:%S.%f")
-                rtt = (time.microsecond - sender_time.microsecond) * 0.000001
-                client_socket.settimeout(rtt * 1.5)
-                print(f"start sending data with RTT: {rtt}")
-                break
+            time = dt.strptime(time, "%Y-%m-%d %H:%M:%S.%f")
+            rtt = (time.microsecond - sender_time.microsecond) * 0.000001
+            client_socket.settimeout(timeout)
+            print(f"start sending data with RTT: {rtt}")
+            break
 
         except socket.timeout:
             print("--Timeout Retransmission--")
 
-    for i in range(0, len(file_data), buf):
-        chunk = file_data[i : i + buf]
-        packet = f"{seq}|".encode('utf-8') + chunk
-        
-        while 1:
+    while 1:
+        if current_ack == -1: break
+
+        if current_ack >= file_size:
+            packet = f'-1{sep}FIN'.encode('utf-8')
             client_socket.sendto(packet, server_address)
-            print(f"Sending SEQ: {seq}")
-            try:
-                ack_data, server = client_socket.recvfrom(40)   #Header size
-                if server != server_address: 
-                    print("Who the f are you?")
-                    continue
-                ack_parts = ack_data.decode('utf-8').split('|')        #expect 2
+            print(f"Sending FIN: {seq}")
 
-                if len(ack_parts) == 2 and ack_parts[0] == 'ACK':
-                    ack_num = int(ack_parts[1])
-                    print(f'Receiving ACK: {ack_num} expect: {seq + buf}')
-                    if ack_num == seq + buf:
-                        seq += buf
-                        break
+        print(f"Sending SEQ: {current_ack} - {file_size - buf}")
+        for seq in range(current_ack, file_size, buf):         #send many at the same time
+            chunk = file_data[seq : seq + buf]
+            packet = f"{seq}{sep}".encode('utf-8') + chunk
+            client_socket.sendto(packet, server_address)
 
-            except socket.timeout:
-                print("--Timeout Retransmission--")
+        try:
+            while 1:
+                ack_data, server = client_socket.recvfrom(40)           #Header size
+                ack_parts = ack_data.decode('utf-8').split(sep)        #expect 2
 
-    eof_packet = f'-1|FIN'.encode('utf-8')
-    client_socket.sendto(eof_packet, server_address)
+                flag = ack_parts[0]
+                current_ack = int(ack_parts[1])
+                print(f'Furthest {flag}: {current_ack}')
+
+                if flag == 'FIN':
+                    break
+
+        except socket.timeout:
+            print("--Timeout Retransmission--")
 
     print("File sent successfully!")
     client_socket.close()
